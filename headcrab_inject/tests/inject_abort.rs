@@ -7,7 +7,7 @@ use cranelift_module::FuncId;
 #[cfg(target_os = "linux")]
 use headcrab::{symbol::RelocatedDwarf, target::UnixTarget};
 #[cfg(target_os = "linux")]
-use headcrab_inject::{compile_clif_code, InjectionContext};
+use headcrab_inject::InjectionModule;
 #[cfg(target_os = "linux")]
 use nix::sys::{signal::Signal, wait::WaitStatus};
 
@@ -16,7 +16,7 @@ static BIN_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/testees/hell
 // FIXME: Running this test just for linux because of privileges issue on macOS. Enable for everything after fixing.
 #[cfg(target_os = "linux")]
 #[test]
-fn inject_abort() -> Result<(), Box<dyn std::error::Error>> {
+fn inject_abort() -> headcrab::CrabResult<()> {
     test_utils::ensure_testees();
 
     let target = test_utils::launch(BIN_PATH);
@@ -28,10 +28,10 @@ fn inject_abort() -> Result<(), Box<dyn std::error::Error>> {
     target.unpause()?;
 
     debuginfo = RelocatedDwarf::from_maps(&target.memory_maps()?)?;
-    let mut inj_ctx = InjectionContext::new(&target)?;
+    let mut inj_module = InjectionModule::new(&target)?;
     let abort_function = debuginfo.get_symbol_address("abort").unwrap() as u64;
     println!("exit fn ptr: {:016x}", abort_function);
-    inj_ctx.define_function(FuncId::from_u32(0), abort_function);
+    inj_module.define_function(FuncId::from_u32(0), abort_function);
 
     let isa = headcrab_inject::target_isa();
 
@@ -51,28 +51,28 @@ fn inject_abort() -> Result<(), Box<dyn std::error::Error>> {
     for func in functions {
         ctx.clear();
         ctx.func = func;
-        compile_clif_code(&mut inj_ctx, &*isa, &mut ctx)?;
+        inj_module.compile_clif_code(&*isa, &mut ctx)?;
     }
 
-    let run_function = inj_ctx.lookup_function(FuncId::from_u32(1));
-    let stack_region = inj_ctx.allocate_readwrite(0x1000)?;
+    let run_function = inj_module.lookup_function(FuncId::from_u32(1));
+    let stack_region = inj_module.inj_ctx().allocate_readwrite(0x1000, Some(16))?;
     println!(
         "run function: 0x{:016x} stack: 0x{:016x}",
         run_function, stack_region
     );
 
-    let orig_regs = inj_ctx.target().read_regs()?;
+    let orig_regs = inj_module.target().read_regs()?;
     println!("orig rip: {:016x}", orig_regs.rip);
     let regs = libc::user_regs_struct {
         rip: run_function,
         rsp: stack_region + 0x1000,
         ..orig_regs
     };
-    inj_ctx.target().write_regs(regs)?;
-    let res = inj_ctx.target().unpause()?;
+    inj_module.target().write_regs(regs)?;
+    let res = inj_module.target().unpause()?;
     if let WaitStatus::Stopped(_, Signal::SIGABRT) = res {
     } else {
-        println!("rip: {:016x}", inj_ctx.target().read_regs()?.rip);
+        println!("rip: {:016x}", inj_module.target().read_regs()?.rip);
         panic!("{:?}", res);
     }
 
